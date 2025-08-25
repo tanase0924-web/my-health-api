@@ -1,0 +1,58 @@
+openapi: 3.1.0
+info:
+  title: My Health API
+  version: "1.0.0"
+servers:
+  - url: https://my-health-api-g02a.onrender.com
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+paths:
+  /daily-dashboard:
+    get:
+      operationId: getDailyDashboard
+      summary: "Latest 7-day health summary as YAML (JA)"
+      description: "Returns a plain text YAML dashboard in Japanese."
+      security:
+        - ApiKey: []
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          description: Unauthorized
+        "500":
+          description: Server error
+  /latest-health:
+    get:
+      operationId: getLatestHealth
+      summary: "Latest 7-day health metrics as JSON"
+      description: "Returns an array of daily health metrics (last 7 days)."
+      security:
+        - ApiKey: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    date: { type: string, format: date }
+                    steps: { type: number, nullable: true }
+                    sleep_hours: { type: number, nullable: true }
+                    active_energy_kcal: { type: number, nullable: true }
+                    resting_hr_bpm: { type: number, nullable: true }
+                    weight_kg: { type: number, nullable: true }
+        "401":
+          description: Unauthorized
+        "500":
+          description: Server error
