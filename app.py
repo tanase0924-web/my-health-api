@@ -7,7 +7,7 @@ import datetime as dt
 from typing import List, Dict, Any
 
 import pandas as pd
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -49,7 +49,7 @@ def _auth_ok(req) -> bool:
 # Drive: 最新CSVの取得
 # - ファイル名日付(YYYY-MM-DD / YYYY_MM_DD / YYYYMMDD) > modifiedTime の順で決定
 # - mimeType は text/csv, application/vnd.ms-excel を許容
-# - 指定フォルダ「直下」を探索（必要なら再帰版に差し替え可）
+# - 指定フォルダ「直下」を探索
 # =========================
 _DATE_IN_NAME = re.compile(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})")
 
@@ -267,7 +267,11 @@ def daily_dashboard():
         csv_bytes = download_latest_csv_from_drive(FOLDER_ID)
         rows = normalize_and_last_7(csv_bytes)
         text = build_yaml_dashboard(rows)
-        return app.response_class(text, mimetype="text/plain; charset=utf-8"), 200
+        # ★ charset を一度だけ付ける（重複回避）
+        resp = Response(text, content_type="text/plain; charset=utf-8")
+        # 任意: キャッシュ無効化（常に最新を返したい場合）
+        resp.headers["Cache-Control"] = "no-store"
+        return resp, 200
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 500
     except Exception as e:
