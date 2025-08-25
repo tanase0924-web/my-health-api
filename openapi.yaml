@@ -4,20 +4,87 @@ info:
   version: "1.0.0"
 servers:
   - url: https://my-health-api-g02a.onrender.com
+
 components:
   securitySchemes:
-    ApiKey:
+    ApiKeyAuth:
       type: apiKey
       in: header
       name: X-API-Key
+  schemas:
+    HealthRow:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+          description: ISO date (YYYY-MM-DD)
+        steps:
+          type: number
+          nullable: true
+        sleep_hours:
+          type: number
+          nullable: true
+        active_energy_kcal:
+          type: number
+          nullable: true
+        resting_hr_bpm:
+          type: number
+          nullable: true
+        weight_kg:
+          type: number
+          nullable: true
+    HealthRows:
+      type: array
+      items:
+        $ref: '#/components/schemas/HealthRow'
+    DashboardJson:
+      type: object
+      properties:
+        content:
+          type: string
+          description: YAML dashboard text
+
 paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Health check
+      description: Returns "ok" to indicate the service is up.
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /latest-health:
+    get:
+      operationId: getLatestHealth
+      summary: Latest 7-day health metrics as JSON
+      description: Returns an array of daily health metrics (last 7 days).
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthRows'
+        "401":
+          description: Unauthorized
+        "500":
+          description: Server error
+
   /daily-dashboard:
     get:
       operationId: getDailyDashboard
-      summary: "Latest 7-day health summary as YAML (JA)"
-      description: "Returns a plain text YAML dashboard in Japanese."
+      summary: Latest 7-day health summary as YAML (JA)
+      description: Returns a plain text YAML dashboard in Japanese.
       security:
-        - ApiKey: []
+        - ApiKeyAuth: []
       responses:
         "200":
           description: OK
@@ -29,29 +96,21 @@ paths:
           description: Unauthorized
         "500":
           description: Server error
-  /latest-health:
+
+  /daily-dashboard.json:
     get:
-      operationId: getLatestHealth
-      summary: "Latest 7-day health metrics as JSON"
-      description: "Returns an array of daily health metrics (last 7 days)."
+      operationId: getDailyDashboardJson
+      summary: Latest 7-day health summary wrapped in JSON
+      description: Returns {"content": "<yaml text>"} for better compatibility with some clients.
       security:
-        - ApiKey: []
+        - ApiKeyAuth: []
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    date: { type: string, format: date }
-                    steps: { type: number, nullable: true }
-                    sleep_hours: { type: number, nullable: true }
-                    active_energy_kcal: { type: number, nullable: true }
-                    resting_hr_bpm: { type: number, nullable: true }
-                    weight_kg: { type: number, nullable: true }
+                $ref: '#/components/schemas/DashboardJson'
         "401":
           description: Unauthorized
         "500":
