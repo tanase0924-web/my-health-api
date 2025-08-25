@@ -4,13 +4,14 @@ import io
 import re
 import json
 import datetime as dt
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 import pandas as pd
 from flask import Flask, jsonify, request, Response
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+import pytz  # ← 追加（requirements.txt に pytz==2025.2 を追記）
 
 # =========================
 # 環境変数
@@ -46,7 +47,7 @@ def _auth_ok(req) -> bool:
     return (API_KEY is not None) and (req.headers.get("X-API-Key") == API_KEY)
 
 # =========================
-# Drive: 最新CSVの取得
+# Drive: 最新CSVの取得（メタ付き）
 # - ファイル名日付(YYYY-MM-DD / YYYY_MM_DD / YYYYMMDD) > modifiedTime の順で決定
 # - mimeType は text/csv, application/vnd.ms-excel を許容
 # - 指定フォルダ「直下」を探索
@@ -69,7 +70,7 @@ def _parse_iso_dt(s: str) -> dt.datetime:
     except Exception:
         return dt.datetime.min
 
-def download_latest_csv_from_drive(folder_id: str) -> bytes:
+def download_latest_csv_from_drive_with_meta(folder_id: str) -> Tuple[bytes, Dict[str, Any]]:
     if not folder_id:
         raise ValueError("GDRIVE_FOLDER_ID 未設定")
 
@@ -105,7 +106,12 @@ def download_latest_csv_from_drive(folder_id: str) -> bytes:
     while not done:
         _, done = downloader.next_chunk()
     buf.seek(0)
-    return buf.read()
+    meta = {
+        "id": latest["id"],
+        "name": latest.get("name"),
+        "modifiedTime": latest.get("modifiedTime"),  # ISO UTC
+    }
+    return buf.read(), meta
 
 # =========================
 # CSV 正規化 → 直近7日
@@ -186,7 +192,7 @@ def normalize_and_last_7(csv_bytes: bytes) -> List[Dict[str, Any]]:
 # =========================
 # YAMLダッシュボード生成
 # =========================
-def _round0(x): 
+def _round0(x):
     return None if x is None else int(round(float(x)))
 
 def _round1(x):
@@ -197,7 +203,7 @@ def build_yaml_dashboard(rows: List[Dict[str, Any]]) -> str:
     rows = sorted(rows, key=lambda r: r["date"])
     latest = rows[-1]
 
-    def safe_vals(key): 
+    def safe_vals(key):
         return [r[key] for r in rows if r.get(key) is not None]
 
     avg_steps  = _round0(st.mean(safe_vals("steps"))) if safe_vals("steps") else None
@@ -215,7 +221,11 @@ def build_yaml_dashboard(rows: List[Dict[str, Any]]) -> str:
         flags.append("安静時心拍がやや高め→睡眠/ストレス/水分を確認")
 
     def fmt_day(d):
-        return f"    - {{日付: {d['date']}, 歩数: {_round0(d.get('steps'))}, 睡眠_h: {_round1(d.get('sleep_hours'))}, 活動_kcal: {_round0(d.get('active_energy_kcal'))}, 体重_kg: {_round1(d.get('weight_kg'))}}}"
+        return (
+            f"    - {{日付: {d['date']}, 歩数: {_round0(d.get('steps'))}, "
+            f"睡眠_h: {_round1(d.get('sleep_hours'))}, 活動_kcal: {_round0(d.get('active_energy_kcal'))}, "
+            f"体重_kg: {_round1(d.get('weight_kg'))}}}"
+        )
 
     y = []
     y.append(f"日付: {latest['date']}")
@@ -240,6 +250,20 @@ def build_yaml_dashboard(rows: List[Dict[str, Any]]) -> str:
     return "\n".join(y)
 
 # =========================
+# 時刻系ユーティリティ
+# =========================
+def to_local_from_iso_utc(dt_str: str, tz_name: str) -> str:
+    """ISO UTC文字列（例: 2025-08-25T00:42:10.123Z）をローカル時刻に整形"""
+    if not dt_str:
+        return ""
+    try:
+        tz = pytz.timezone(tz_name)
+    except Exception:
+        tz = pytz.timezone("Asia/Tokyo")
+    dt_utc = dt.datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+    return dt_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+
+# =========================
 # ルーティング
 # =========================
 @app.get("/healthz")
@@ -251,7 +275,7 @@ def latest_health():
     if not _auth_ok(request):
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        csv_bytes = download_latest_csv_from_drive(FOLDER_ID)
+        csv_bytes, _ = download_latest_csv_from_drive_with_meta(FOLDER_ID)
         data = normalize_and_last_7(csv_bytes)
         return jsonify(data), 200
     except FileNotFoundError as e:
@@ -263,15 +287,57 @@ def latest_health():
 def daily_dashboard():
     if not _auth_ok(request):
         return jsonify({"error": "Unauthorized"}), 401
+    tz_name = request.args.get("tz", "Asia/Tokyo")
+    force_today = request.args.get("force_today", "0").lower() in ("1", "true", "yes")
+
     try:
-        csv_bytes = download_latest_csv_from_drive(FOLDER_ID)
+        csv_bytes, meta = download_latest_csv_from_drive_with_meta(FOLDER_ID)
         rows = normalize_and_last_7(csv_bytes)
         text = build_yaml_dashboard(rows)
-        # ★ charset を一度だけ付ける（重複回避）
+
+        # 見出し日付の上書き（途中経過） & 最終更新メタの追記
+        modified_local = to_local_from_iso_utc(meta.get("modifiedTime", ""), tz_name)
+        header_line = f"最終更新: {modified_local} [{meta.get('name')}]"
+        if force_today:
+            try:
+                today_local = dt.datetime.now(pytz.timezone(tz_name)).date().isoformat()
+            except Exception:
+                today_local = dt.date.today().isoformat()
+            text = text.replace(f"日付: {rows[-1]['date']}", f"日付: {today_local}（途中経過）")
+        text = header_line + "\n" + text
+
         resp = Response(text, content_type="text/plain; charset=utf-8")
-        # 任意: キャッシュ無効化（常に最新を返したい場合）
         resp.headers["Cache-Control"] = "no-store"
         return resp, 200
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        return jsonify({"error": f"生成失敗: {str(e)}"}), 500
+
+@app.get("/daily-dashboard.json")
+def daily_dashboard_json():
+    if not _auth_ok(request):
+        return jsonify({"error": "Unauthorized"}), 401
+    tz_name = request.args.get("tz", "Asia/Tokyo")
+    force_today = request.args.get("force_today", "0").lower() in ("1", "true", "yes")
+
+    try:
+        csv_bytes, meta = download_latest_csv_from_drive_with_meta(FOLDER_ID)
+        rows = normalize_and_last_7(csv_bytes)
+        text = build_yaml_dashboard(rows)
+
+        # 同様に加工して JSON で返す
+        modified_local = to_local_from_iso_utc(meta.get("modifiedTime", ""), tz_name)
+        header_line = f"最終更新: {modified_local} [{meta.get('name')}]"
+        if force_today:
+            try:
+                today_local = dt.datetime.now(pytz.timezone(tz_name)).date().isoformat()
+            except Exception:
+                today_local = dt.date.today().isoformat()
+            text = text.replace(f"日付: {rows[-1]['date']}", f"日付: {today_local}（途中経過）")
+        text = header_line + "\n" + text
+
+        return jsonify({"content": text}), 200
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 500
     except Exception as e:
